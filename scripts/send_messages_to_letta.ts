@@ -24,26 +24,16 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
-import { spawn } from 'child_process';
-import { fileURLToPath } from 'url';
 import { getAgentId } from './agent_config.js';
 import {
   LETTA_API_BASE,
   loadSyncState,
   saveSyncState,
   getOrCreateConversation,
-  getSyncStateFile,
   SyncState,
   LogFn,
   getMode,
 } from './conversation_utils.js';
-
-// ESM-compatible __dirname
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// Windows compatibility: npx needs to be npx.cmd on Windows
-const NPX_CMD = process.platform === 'win32' ? 'npx.cmd' : 'npx';
 
 // Configuration
 const TEMP_STATE_DIR = '/tmp/letta-claude-sync';  // Temp state (logs, etc.)
@@ -548,62 +538,30 @@ async function main(): Promise<void> {
     const conversationId = await getOrCreateConversation(apiKey, agentId, hookInput.session_id, hookInput.cwd, state, log);
     log(`Using conversation: ${conversationId}`);
 
-    // Save state now (with conversation ID) so it persists even if worker fails
+    // Save state now (with conversation ID) so it persists even if send fails
     saveSyncState(hookInput.cwd, state, log);
 
-    // Build the message payload (same format as sendBatchToConversation)
-    const transcriptEntries = newMessages.map(m => {
-      const role = m.role === 'user' ? 'user' : m.role === 'assistant' ? 'claude_code' : 'system';
-      const escaped = m.text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      return `<message role="${role}">\n${escaped}\n</message>`;
-    }).join('\n');
+    // Send messages directly to Letta (async hook runs in background)
+    const result = await sendBatchToConversation(apiKey, conversationId, hookInput.session_id, newMessages);
 
-    const userMessage = `<claude_code_session_update>
-<session_id>${hookInput.session_id}</session_id>
+    if (result.skipped) {
+      log('Conversation busy (409), will retry on next Stop');
+    } else {
+      // Update lastProcessedIndex on success
+      state.lastProcessedIndex = messages.length - 1;
+      saveSyncState(hookInput.cwd, state, log);
+      log(`Updated state: lastProcessedIndex=${messages.length - 1}`);
+    }
 
-<transcript>
-${transcriptEntries}
-</transcript>
-
-<instructions>
-You may provide commentary or guidance for Claude Code. Your response will be added to Claude's context window on the next prompt. Use this to:
-- Offer observations about the user's work
-- Provide reminders or context from your memory
-- Suggest approaches or flag potential issues
-- Send async messages/guidance to Claude Code
-
-Write your response as if speaking directly to Claude Code.
-</instructions>
-</claude_code_session_update>`;
-
-    // Write payload to temp file for the worker
-    const payloadFile = path.join(TEMP_STATE_DIR, `payload-${hookInput.session_id}-${Date.now()}.json`);
-    const payload = {
-      apiKey,
-      conversationId,
-      sessionId: hookInput.session_id,
-      message: userMessage,
-      stateFile: getSyncStateFile(hookInput.cwd, hookInput.session_id),
-      newLastProcessedIndex: messages.length - 1,
+    // Output systemMessage so Claude gets notified on next turn
+    const output = {
+      systemMessage: result.skipped
+        ? 'Letta sync skipped (conversation busy), will retry next stop.'
+        : `Sent ${newMessages.length} messages to Letta agent.`,
     };
-    fs.writeFileSync(payloadFile, JSON.stringify(payload), 'utf-8');
-    log(`Wrote payload to ${payloadFile}`);
+    console.log(JSON.stringify(output));
 
-    // Spawn worker as detached background process
-    const workerScript = path.join(__dirname, 'send_worker.ts');
-    const isWindows = process.platform === 'win32';
-    const child = spawn(NPX_CMD, ['tsx', workerScript, payloadFile], {
-      detached: true,
-      stdio: 'ignore',
-      cwd: hookInput.cwd,
-      env: process.env,
-      // Windows requires shell: true for detached processes to work properly
-      ...(isWindows && { shell: true, windowsHide: true }),
-    });
-    child.unref();
-    log(`Spawned background worker (PID: ${child.pid})`);
-
-    log('Hook completed (worker running in background)');
+    log('Hook completed');
 
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
