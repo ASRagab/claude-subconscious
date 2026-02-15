@@ -1,6 +1,9 @@
-# Claude Subconscious
+# Claude Subconscious (Fork)
 
 A subconscious for Claude Code. A [Letta](https://letta.com) agent that watches your sessions, accumulates context, and provides async guidance to "main Claude".
+
+> [!NOTE]
+> This is a fork of [letta-ai/claude-subconscious](https://github.com/letta-ai/claude-subconscious) with architectural improvements. See [Fork Changes](#fork-changes) below.
 
 > [!IMPORTANT]
 > Claude Subconscious is an experimental way to extend Claude Code (a closed source / black box agent) with the power of Letta's memory system and context engineering.
@@ -8,6 +11,13 @@ A subconscious for Claude Code. A [Letta](https://letta.com) agent that watches 
 > If you're looking for a coding agent that's memory-first, model agnostic, and fully open source, we recommend using [**Letta Code**](https://github.com/letta-ai/letta-code).
 
 ![evil claude](assets/evil-claude.jpeg)
+
+## Fork Changes
+
+This fork includes the following improvements over [upstream](https://github.com/letta-ai/claude-subconscious):
+
+- **Simplified Stop hook** - Replaced the fire-and-forget worker pattern (`spawn` + temp file + detached process) with a direct Letta API call using Claude Code's native `async: true` hook support. Eliminates orphaned workers, temp file juggling, and Windows spawn issues.
+- **ESM/CJS compatibility fix** - Renamed `silent-npx.js` to `silent-npx.cjs` to resolve module format conflicts when running in ESM projects.
 
 ## What Is This?
 
@@ -46,7 +56,7 @@ Letta injects content into user prompts via stdout and sends your Claude Code tr
 Install from GitHub:
 
 ```
-/plugin marketplace add letta-ai/claude-subconscious
+/plugin marketplace add ASRagab/claude-subconscious
 /plugin install claude-subconscious@claude-subconscious
 ```
 
@@ -62,7 +72,7 @@ Install from GitHub:
 Clone the repository:
 
 ```bash
-git clone https://github.com/letta-ai/claude-subconscious.git
+git clone https://github.com/ASRagab/claude-subconscious.git
 cd claude-subconscious
 npm install
 ```
@@ -249,7 +259,7 @@ The plugin uses four Claude Code hooks:
 | `SessionStart` | `session_start.ts` | 5s | Notifies agent, cleans up legacy CLAUDE.md |
 | `UserPromptSubmit` | `sync_letta_memory.ts` | 10s | Injects memory + messages via stdout |
 | `PreToolUse` | `pretool_sync.ts` | 5s | Mid-workflow updates via `additionalContext` |
-| `Stop` | `send_messages_to_letta.ts` | 15s | Spawns background worker to send transcript |
+| `Stop` | `send_messages_to_letta.ts` | 45s (async) | Sends transcript to Letta agent |
 
 ### SessionStart
 
@@ -276,21 +286,14 @@ Before each tool use:
 
 ### Stop
 
-Uses a **fire-and-forget** pattern to avoid timeout issues:
+Uses Claude Code's native **async hook** support (`"async": true`) to send transcripts without blocking:
 
-1. Main hook (`send_messages_to_letta.ts`) runs quickly:
-   - Parses the session transcript (JSONL format)
-   - Extracts user messages, assistant responses, thinking blocks, and tool usage
-   - Writes payload to a temp file
-   - Spawns detached background worker (`send_worker.ts`)
-   - Exits immediately
+- Parses the session transcript (JSONL format)
+- Extracts user messages, assistant responses, thinking blocks, and tool usage
+- Sends messages directly to the Letta API
+- Updates state on success; retries on next Stop if conversation is busy (409)
 
-2. Background worker runs independently:
-   - Sends messages to Letta agent
-   - Updates state on success
-   - Cleans up temp file
-
-This ensures the hook never times out, even when the Letta API is slow.
+The async flag allows the hook to run in the background with a 45s timeout, eliminating the need for a separate worker process. The timeout provides ~3x headroom over the typical execution time (5-15s), which covers cold starts, slow networks, and first-run agent imports.
 
 ## State Management
 
@@ -307,8 +310,7 @@ Persisted in your project directory (this is **conversation bookkeeping**, not a
 Log files for debugging:
 - `session_start.log` - Session initialization
 - `sync_letta_memory.log` - Memory sync operations
-- `send_messages.log` - Main Stop hook
-- `send_worker.log` - Background worker
+- `send_messages.log` - Stop hook (transcript send)
 
 ## What Your Agent Receives
 
@@ -400,14 +402,13 @@ tail -f /tmp/letta-claude-sync/*.log
 
 # Or specific logs
 tail -f /tmp/letta-claude-sync/send_messages.log
-tail -f /tmp/letta-claude-sync/send_worker.log
 ```
 
 ## API Notes
 
 - Memory sync requires `?include=agent.blocks` query parameter (Letta API doesn't include relationship fields by default)
 - 409 Conflict responses are handled gracefully - messages queue for next sync when conversation is busy
-- Conversations API returns streaming responses; worker consumes full stream before updating state
+- Conversations API returns streaming responses; the Stop hook reads only the first chunk to confirm acceptance, then releases the stream
 
 ## License
 
