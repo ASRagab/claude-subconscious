@@ -6,11 +6,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/letta-ai/claude-subconscious.git"
+    "url": "git+https://github.com/ASRagab/claude-subconscious.git"
   },
-  "homepage": "https://github.com/letta-ai/claude-subconscious#readme",
+  "homepage": "https://github.com/ASRagab/claude-subconscious#readme",
   "bugs": {
-    "url": "https://github.com/letta-ai/claude-subconscious/issues"
+    "url": "https://github.com/ASRagab/claude-subconscious/issues"
   },
   "keywords": [
     "claude",
