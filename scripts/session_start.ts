@@ -18,7 +18,7 @@
  *   0 - Success
  *   1 - Non-blocking error
  *
- * Log file: /tmp/letta-claude-sync/session_start.log
+ * Log file: $TMPDIR/letta-claude-sync-$UID/session_start.log
  */
 
 import * as fs from 'fs';
@@ -28,13 +28,15 @@ import { getAgentId } from './agent_config.js';
 import {
   cleanLettaFromClaudeMd,
   createConversation,
+  fetchAgent,
   getMode,
+  getTempStateDir,
 } from './conversation_utils.js';
 
 // Configuration
 const LETTA_BASE_URL = process.env.LETTA_BASE_URL || 'https://api.letta.com';
 const LETTA_API_BASE = `${LETTA_BASE_URL}/v1`;
-const TEMP_STATE_DIR = '/tmp/letta-claude-sync';
+const TEMP_STATE_DIR = getTempStateDir();
 const LOG_FILE = path.join(TEMP_STATE_DIR, 'session_start.log');
 
 interface HookInput {
@@ -240,9 +242,65 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // Try to open TTY for user-visible output (bypasses Claude's capture)
+  let tty: fs.WriteStream | null = null;
   try {
+    tty = fs.createWriteStream('/dev/tty');
+  } catch {
+    // TTY not available (e.g., non-interactive session)
+  }
+
+  const writeTty = (text: string) => {
+    if (tty) tty.write(text);
+  };
+
+  try {
+    // Show initial connecting message with mascot
+    writeTty('\n');
+    writeTty('\x1b[1m  Claude Subconscious\x1b[0m\n');
+    writeTty('\n');
+    writeTty('\x1b[35m'); // Purple
+    writeTty('  ▐\x1b[31m▛\x1b[35m███\x1b[31m▜\x1b[35m▌\n');
+    writeTty(' ▝▜█████▛▘\n');
+    writeTty('   ▘▘ ▝▝\n');
+    writeTty('\x1b[0m'); // Reset
+    writeTty('\x1b[2m  Connecting...\x1b[0m');
+
     // Get agent ID (from env, saved config, or auto-import)
     const agentId = await getAgentId(apiKey, log);
+
+    // Fetch agent details for display
+    const agent = await fetchAgent(apiKey, agentId);
+    const agentName = agent.name || 'Unnamed Agent';
+    const modelHandle = (agent as any).llm_config?.handle || (agent as any).llm_config?.model || 'unknown';
+
+    // Clear connecting message and show info
+    writeTty('\r\x1b[K'); // Clear current line
+    writeTty('\n  Agent information:\n');
+    writeTty('\x1b[1m'); // Bold
+    writeTty(`  ${agentName}\n`);
+    writeTty('\x1b[0m'); // Reset
+    writeTty('\x1b[2m'); // Dim
+    writeTty(`  ${agentId}\n`);
+    writeTty('\n');
+
+    // Settings
+    const checkpointMode = process.env.LETTA_CHECKPOINT_MODE || 'blocking';
+    const baseUrl = process.env.LETTA_BASE_URL || 'https://api.letta.com';
+    writeTty(`  Model:      ${modelHandle}\n`);
+    writeTty(`  Mode:       ${mode}\n`);
+    writeTty(`  Checkpoint: ${checkpointMode}\n`);
+    if (process.env.LETTA_BASE_URL) {
+      writeTty(`  Server:     ${baseUrl}\n`);
+    }
+    if (process.env.LETTA_HOME) {
+      writeTty(`  Home:       ${process.env.LETTA_HOME}\n`);
+    }
+    writeTty('\n');
+    writeTty('  Learn about configuration settings:\n');
+    writeTty('  github.com/letta-ai/claude-subconscious\n');
+    writeTty('\x1b[0m'); // Reset
+    writeTty('\n');
     // Read hook input
     log('Reading hook input from stdin...');
     const hookInput = await readHookInput();
@@ -301,7 +359,28 @@ async function main(): Promise<void> {
     }
     log('CLAUDE.md cleanup done');
 
-    // Send session start message
+    // Show conversation link (only for hosted Letta) - print before blocking send
+    const isHosted = !process.env.LETTA_BASE_URL;
+    if (isHosted) {
+      const convUrl = `https://app.letta.com/agents/${agentId}?conversation=${conversationId}`;
+      writeTty('\x1b[2m'); // Dim
+      writeTty('  View the subconscious agent:\n');
+      writeTty(`  ${convUrl}\n`);
+      writeTty('\x1b[0m'); // Reset
+      writeTty('\n');
+    }
+
+    // Discord link
+    writeTty('\x1b[2m'); // Dim
+    writeTty('  Come talk to us on Discord:\n');
+    writeTty('  https://discord.gg/letta\n');
+    writeTty('\x1b[0m'); // Reset
+    writeTty('\n');
+
+    // Close TTY before potentially slow network call
+    if (tty) tty.end();
+
+    // Send session start message (may take a while, but TTY output is done)
     await sendSessionStartMessage(apiKey, conversationId, hookInput.session_id, hookInput.cwd);
 
     log('Completed successfully');
@@ -309,7 +388,14 @@ async function main(): Promise<void> {
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     log(`ERROR: ${errorMessage}`);
-    console.error(`Error in session start hook: ${errorMessage}`);
+
+    // Show error to user
+    writeTty('\r\x1b[K'); // Clear current line
+    writeTty('\x1b[31m'); // Red
+    writeTty(`  Letta error: ${errorMessage}\n`);
+    writeTty('\x1b[0m'); // Reset
+    if (tty) tty.end();
+
     process.exit(1);
   }
 }
