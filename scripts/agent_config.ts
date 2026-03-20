@@ -15,12 +15,11 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import { buildLettaApiUrl } from './letta_api_url.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const LETTA_BASE_URL = process.env.LETTA_BASE_URL || 'https://api.letta.com';
-const LETTA_API_BASE = `${LETTA_BASE_URL}/v1`;
 const CONFIG_DIR = path.join(process.env.HOME || '~', '.letta', 'claude-subconscious');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 const DEFAULT_AGENT_FILE = path.join(__dirname, '..', 'Subconscious.af');
@@ -153,8 +152,48 @@ function getAgentNameFromFile(): string {
 /**
  * Rename an agent
  */
+/**
+ * Enable memfs (git-backed memory filesystem) on an agent.
+ * Adds the 'git-memory-enabled' tag which triggers the server
+ * to create a git repo and sync blocks as files.
+ */
+async function enableMemfs(apiKey: string, agentId: string): Promise<void> {
+  // First GET the agent to read current tags
+  const getUrl = buildLettaApiUrl(`/agents/${agentId}`);
+  const getResponse = await fetch(getUrl, {
+    method: 'GET',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+    },
+  });
+
+  let existingTags: string[] = [];
+  if (getResponse.ok) {
+    const agent = await getResponse.json();
+    existingTags = agent.tags || [];
+  }
+
+  // Add git-memory-enabled tag (preserving existing tags)
+  if (existingTags.includes('git-memory-enabled')) return;
+
+  const patchUrl = buildLettaApiUrl(`/agents/${agentId}`);
+  const response = await fetch(patchUrl, {
+    method: 'PATCH',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ tags: [...existingTags, 'git-memory-enabled'] }),
+  });
+
+  if (!response.ok) {
+    // Non-fatal - agent still works without memfs
+    console.error(`Warning: Could not enable memfs: ${response.status}`);
+  }
+}
+
 async function renameAgent(apiKey: string, agentId: string, name: string): Promise<void> {
-  const url = `${LETTA_API_BASE}/agents/${agentId}`;
+  const url = buildLettaApiUrl(`/agents/${agentId}`);
   
   const response = await fetch(url, {
     method: 'PATCH',
@@ -175,7 +214,7 @@ async function renameAgent(apiKey: string, agentId: string, name: string): Promi
  * List available models from Letta server
  */
 async function listAvailableModels(apiKey: string): Promise<LettaModel[]> {
-  const url = `${LETTA_API_BASE}/models/`;
+  const url = buildLettaApiUrl('/models/');
   
   const response = await fetch(url, {
     method: 'GET',
@@ -195,7 +234,7 @@ async function listAvailableModels(apiKey: string): Promise<LettaModel[]> {
  * Get agent details including current model configuration
  */
 async function getAgentDetails(apiKey: string, agentId: string): Promise<AgentDetails> {
-  const url = `${LETTA_API_BASE}/agents/${agentId}`;
+  const url = buildLettaApiUrl(`/agents/${agentId}`);
   
   const response = await fetch(url, {
     method: 'GET',
@@ -402,7 +441,7 @@ async function updateAgentModel(
   currentConfig: LlmConfig | undefined,
   log: (msg: string) => void = console.log
 ): Promise<void> {
-  const url = `${LETTA_API_BASE}/agents/${agentId}`;
+  const url = buildLettaApiUrl(`/agents/${agentId}`);
 
   log(`Updating agent model to: ${modelHandle}`);
 
@@ -433,7 +472,7 @@ async function updateAgentModel(
  * Import agent from .af file
  */
 async function importDefaultAgent(apiKey: string): Promise<string> {
-  const url = `${LETTA_API_BASE}/agents/import`;
+  const url = buildLettaApiUrl('/agents/import');
   
   // Read the agent file
   const agentFileContent = fs.readFileSync(DEFAULT_AGENT_FILE);
@@ -469,6 +508,9 @@ async function importDefaultAgent(apiKey: string): Promise<string> {
   
   // Rename to original name (removes "_copy" suffix added by import)
   await renameAgent(apiKey, agentId, originalName);
+  
+  // Enable memfs (git-backed memory filesystem) for better memory management
+  await enableMemfs(apiKey, agentId);
   
   return agentId;
 }

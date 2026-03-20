@@ -8,14 +8,17 @@ import * as os from 'os';
 import * as path from 'path';
 import { spawn, ChildProcess } from 'child_process';
 import { fileURLToPath } from 'url';
+import {
+  buildLettaApiUrl,
+  LETTA_API_BASE,
+} from './letta_api_url.js';
 
 // ESM-compatible __dirname
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Configuration
-const LETTA_BASE_URL = process.env.LETTA_BASE_URL || 'https://api.letta.com';
-export const LETTA_API_BASE = `${LETTA_BASE_URL}/v1`;
+export { LETTA_API_BASE };
 // Only show app URL for hosted service; self-hosted users get IDs directly
 const IS_HOSTED = !process.env.LETTA_BASE_URL;
 const LETTA_APP_BASE = 'https://app.letta.com';
@@ -57,6 +60,30 @@ export function getMode(): LettaMode {
 export function getTempStateDir(): string {
   const uid = typeof process.getuid === 'function' ? process.getuid() : process.pid;
   return path.join(os.tmpdir(), `letta-claude-sync-${uid}`);
+}
+
+// ============================================
+// SDK Tools Configuration
+// ============================================
+
+export type SdkToolsMode = 'read-only' | 'full' | 'off';
+
+/** Read-only tool set: safe defaults for background Sub execution */
+export const SDK_TOOLS_READ_ONLY = ['Read', 'Grep', 'Glob', 'web_search', 'fetch_webpage'];
+
+/** Tools to always block in SDK sessions (require interactive input) */
+export const SDK_TOOLS_BLOCKED = ['AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode'];
+
+/**
+ * Get the SDK tools mode from LETTA_SDK_TOOLS env var.
+ * - read-only (default): Sub can read files and search the web
+ * - full: Sub has full tool access (use with caution)
+ * - off: No client-side tools (listen-only, memory operations only)
+ */
+export function getSdkToolsMode(): SdkToolsMode {
+  const mode = process.env.LETTA_SDK_TOOLS?.toLowerCase();
+  if (mode === 'full' || mode === 'off') return mode;
+  return 'read-only';
 }
 
 // Types
@@ -178,7 +205,7 @@ export function saveConversationsMap(cwd: string, map: ConversationsMap): void {
  * Create a new conversation for an agent
  */
 export async function createConversation(apiKey: string, agentId: string, log: LogFn = noopLog): Promise<string> {
-  const url = `${LETTA_API_BASE}/conversations?agent_id=${agentId}`;
+  const url = buildLettaApiUrl('/conversations/', { agent_id: agentId });
   
   log(`Creating new conversation for agent ${agentId}`);
   
@@ -290,41 +317,6 @@ export function lookupConversation(cwd: string, sessionId: string): string | nul
   }
 }
 
-/**
- * Send a message to a Letta conversation (fire-and-forget style)
- * Returns the response for the caller to handle
- */
-export async function sendMessageToConversation(
-  apiKey: string,
-  conversationId: string,
-  role: string,
-  text: string,
-  log: LogFn = noopLog
-): Promise<Response> {
-  const url = `${LETTA_API_BASE}/conversations/${conversationId}/messages`;
-
-  log(`Sending ${role} message to conversation ${conversationId} (${text.length} chars)`);
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      messages: [
-        {
-          role: role,
-          content: text,
-        }
-      ],
-    }),
-  });
-
-  log(`Response status: ${response.status}`);
-  return response;
-}
-
 // ============================================
 // Agent and Memory Block Types
 // ============================================
@@ -350,7 +342,9 @@ export interface Agent {
  * Fetch agent data from Letta API
  */
 export async function fetchAgent(apiKey: string, agentId: string): Promise<Agent> {
-  const url = `${LETTA_API_BASE}/agents/${agentId}?include=agent.blocks`;
+  const url = buildLettaApiUrl(`/agents/${agentId}`, {
+    include: 'agent.blocks',
+  });
 
   const response = await fetch(url, {
     method: 'GET',
@@ -579,8 +573,16 @@ export function formatAllBlocksForStdout(agent: Agent, conversationId: string | 
     locationInfo = `Agent ID: ${agent.id}${conversationId ? `, Conversation: ${conversationId}` : ''}`;
   }
 
+  const sdkToolsMode = getSdkToolsMode();
+  const capabilityLine = sdkToolsMode === 'full'
+    ? 'It can read files, search the web, and make changes to your codebase.'
+    : sdkToolsMode === 'read-only'
+    ? 'It can read files, search your codebase, and browse the web (read-only).'
+    : 'It operates in listen-only mode (memory updates only).';
+
   const header = `<letta_context>
-Subconscious agent "${agentName}" is observing this session.
+Subconscious agent "${agentName}" is watching this session and whispering guidance.
+${capabilityLine}
 ${locationInfo}
 </letta_context>`;
 

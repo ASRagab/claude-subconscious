@@ -20,15 +20,13 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
-import { fileURLToPath } from 'url';
 import { getAgentId } from './agent_config.js';
+import { buildLettaApiUrl } from './letta_api_url.js';
 import {
   loadSyncState,
   saveSyncState,
   getOrCreateConversation,
-  getSyncStateFile,
   lookupConversation,
-  spawnSilentWorker,
   SyncState,
   Agent,
   MemoryBlock,
@@ -38,12 +36,7 @@ import {
   cleanLettaFromClaudeMd,
   getMode,
   getTempStateDir,
-  LETTA_API_BASE,
 } from './conversation_utils.js';
-
-// ESM-compatible __dirname
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 // Configuration
 const DEBUG = process.env.LETTA_DEBUG === '1';
@@ -107,17 +100,6 @@ async function readHookInput(): Promise<HookInput | null> {
       rl.close();
     }, 100);
   });
-}
-
-/**
- * Count lines in transcript file (for tracking lastProcessedIndex)
- */
-function countTranscriptLines(transcriptPath: string): number {
-  if (!fs.existsSync(transcriptPath)) {
-    return 0;
-  }
-  const content = fs.readFileSync(transcriptPath, 'utf-8');
-  return content.split('\n').filter(line => line.trim()).length;
 }
 
 /**
@@ -216,7 +198,9 @@ async function fetchAssistantMessages(
 
   // Use a high limit because Letta returns multiple entries per logical message
   // (hidden_reasoning + assistant_message pairs), so limit=50 may not reach newest messages
-  const url = `${LETTA_API_BASE}/conversations/${conversationId}/messages?limit=300`;
+  const url = buildLettaApiUrl(`/conversations/${conversationId}/messages`, {
+    limit: 300,
+  });
 
   const response = await fetch(url, {
     method: 'GET',
@@ -402,49 +386,6 @@ async function main(): Promise<void> {
     }
     
     console.log(outputs.join('\n\n'));
-    
-    // Send user prompt to Letta early (gives Letta a head start while Claude processes)
-    if (sessionId && hookInput?.prompt && state) {
-      try {
-        // Ensure we have a conversation
-        const convId = await getOrCreateConversation(apiKey, agentId, sessionId, cwd, state);
-        
-        // Get current transcript length for index tracking
-        const transcriptLength = hookInput.transcript_path 
-          ? countTranscriptLines(hookInput.transcript_path)
-          : 0;
-        
-        // Format the prompt message
-        const promptMessage = `<claude_code_user_prompt>
-<session_id>${sessionId}</session_id>
-<prompt>${escapeXmlContent(hookInput.prompt)}</prompt>
-<note>Early notification - Claude Code is processing this now. Full transcript with response will follow.</note>
-</claude_code_user_prompt>`;
-
-        // Write payload for background worker
-        if (!fs.existsSync(TEMP_STATE_DIR)) {
-          fs.mkdirSync(TEMP_STATE_DIR, { recursive: true });
-        }
-        const payloadFile = path.join(TEMP_STATE_DIR, `prompt-${sessionId}-${Date.now()}.json`);
-        
-        const payload = {
-          apiKey,
-          conversationId: convId,
-          sessionId,
-          message: promptMessage,
-          stateFile: getSyncStateFile(cwd, sessionId),
-          newLastProcessedIndex: transcriptLength > 0 ? transcriptLength - 1 : 0,
-        };
-        fs.writeFileSync(payloadFile, JSON.stringify(payload), 'utf-8');
-        
-        // Spawn background worker
-        const workerScript = path.join(__dirname, 'send_worker.ts');
-        spawnSilentWorker(workerScript, payloadFile, cwd);
-      } catch (promptError) {
-        // Don't fail the sync if prompt sending fails - just log warning
-        console.error(`Warning: Failed to send prompt to Letta: ${promptError}`);
-      }
-    }
     
     // Save state
     if (state && sessionId) {

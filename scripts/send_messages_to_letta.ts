@@ -1,44 +1,48 @@
 #!/usr/bin/env npx tsx
 /**
  * Send Messages to Letta Script
- *
+ * 
  * Sends Claude Code conversation messages to a Letta agent.
  * This script is designed to run as a Claude Code Stop hook.
- *
+ * 
  * Environment Variables:
  *   LETTA_API_KEY - API key for Letta authentication
  *   LETTA_AGENT_ID - Agent ID to send messages to
- *
+ * 
  * Hook Input (via stdin):
  *   - session_id: Current session ID
  *   - transcript_path: Path to conversation JSONL file
  *   - stop_hook_active: Whether stop hook is already active
- *
+ * 
  * Exit Codes:
  *   0 - Success
  *   1 - Non-blocking error
- *
+ * 
  * Log file: $TMPDIR/letta-claude-sync-$UID/send_messages.log
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { fileURLToPath } from 'url';
 import { getAgentId } from './agent_config.js';
 import {
-  LETTA_API_BASE,
   loadSyncState,
   saveSyncState,
   getOrCreateConversation,
-  SyncState,
-  LogFn,
+  getSyncStateFile,
+  spawnSilentWorker,
   getMode,
   getTempStateDir,
+  getSdkToolsMode,
 } from './conversation_utils.js';
 import {
   readTranscript,
   formatMessagesForLetta,
-  TranscriptMessage,
 } from './transcript_utils.js';
+
+// ESM-compatible __dirname
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Configuration
 const TEMP_STATE_DIR = getTempStateDir();
@@ -96,119 +100,6 @@ async function readHookInput(): Promise<HookInput> {
 }
 
 
-interface SendResult {
-  skipped: boolean;
-}
-
-/**
- * Send a message to a Letta conversation
- * Note: The conversations API streams responses, so we consume minimally
- * Returns { skipped: true } if conversation is busy (409), otherwise { skipped: false }
- */
-async function sendMessageToConversation(
-  apiKey: string,
-  conversationId: string,
-  role: string,
-  text: string
-): Promise<SendResult> {
-  const url = `${LETTA_API_BASE}/conversations/${conversationId}/messages`;
-
-  log(`Sending ${role} message to conversation ${conversationId} (${text.length} chars)`);
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      messages: [
-        {
-          role: role,
-          content: text,
-        }
-      ],
-    }),
-  });
-
-  log(`  Response status: ${response.status}`);
-
-  // Handle 409 Conflict gracefully - conversation is busy, skip and retry on next Stop
-  if (response.status === 409) {
-    log(`  Conversation busy (409) - skipping, will sync on next Stop`);
-    return { skipped: true };
-  }
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    log(`  Error response: ${errorText}`);
-    throw new Error(`Letta API error (${response.status}): ${errorText}`);
-  }
-
-  // Consume the stream minimally - just read first chunk to confirm it started
-  // The agent will continue processing in the background
-  const reader = response.body?.getReader();
-  if (reader) {
-    try {
-      const { value } = await reader.read();
-      if (value) {
-        const chunk = new TextDecoder().decode(value);
-        log(`  Stream started, first chunk: ${chunk.substring(0, 100)}...`);
-      }
-    } finally {
-      reader.cancel(); // Release the stream
-    }
-  }
-
-  log(`  Message sent to conversation successfully`);
-  return { skipped: false };
-}
-
-/**
- * Send batch of messages to Letta conversation (as a combined system message for context)
- * Returns { skipped: true } if conversation was busy, { skipped: false } otherwise
- */
-async function sendBatchToConversation(
-  apiKey: string,
-  conversationId: string,
-  sessionId: string,
-  messages: Array<{role: string, text: string}>
-): Promise<SendResult> {
-  if (messages.length === 0) {
-    log(`No messages to send`);
-    return { skipped: false };
-  }
-
-  // Format as XML-structured transcript
-  const transcriptEntries = messages.map(m => {
-    const role = m.role === 'user' ? 'user' : m.role === 'assistant' ? 'claude_code' : 'system';
-    // Escape XML special chars in text
-    const escaped = m.text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    return `<message role="${role}">\n${escaped}\n</message>`;
-  }).join('\n');
-
-  const userMessage = `<claude_code_session_update>
-<session_id>${sessionId}</session_id>
-
-<transcript>
-${transcriptEntries}
-</transcript>
-
-<instructions>
-You may provide commentary or guidance for Claude Code. Your response will be added to Claude's context window on the next prompt. Use this to:
-- Offer observations about the user's work
-- Provide reminders or context from your memory
-- Suggest approaches or flag potential issues
-- Send async messages/guidance to Claude Code
-
-Write your response as if speaking directly to Claude Code.
-</instructions>
-</claude_code_session_update>`;
-
-  log(`Sending batch of ${messages.length} messages to conversation ${conversationId}`);
-  return await sendMessageToConversation(apiKey, conversationId, 'user', userMessage);
-}
-
 /**
  * Main function
  */
@@ -222,7 +113,7 @@ async function main(): Promise<void> {
     log('Mode is off, exiting');
     process.exit(0);
   }
-
+  
   // Get environment variables
   const apiKey = process.env.LETTA_API_KEY;
 
@@ -247,7 +138,7 @@ async function main(): Promise<void> {
     log(`  stop_hook_active: ${hookInput.stop_hook_active}`);
     log(`  hook_event_name: ${hookInput.hook_event_name}`);
     log(`  cwd: ${hookInput.cwd}`);
-
+    
     // Prevent infinite loops if stop hook is already active
     if (hookInput.stop_hook_active) {
       log('Stop hook already active, exiting to prevent loop');
@@ -258,7 +149,7 @@ async function main(): Promise<void> {
     log(`Reading transcript from: ${hookInput.transcript_path}`);
     const messages = await readTranscript(hookInput.transcript_path, log);
     log(`Found ${messages.length} messages in transcript`);
-
+    
     if (messages.length === 0) {
       log('No messages found, exiting');
       process.exit(0);
@@ -274,10 +165,10 @@ async function main(): Promise<void> {
 
     // Load sync state (from durable storage)
     const state = loadSyncState(hookInput.cwd, hookInput.session_id, log);
-
+    
     // Format new messages
     const newMessages = formatMessagesForLetta(messages, state.lastProcessedIndex, log);
-
+    
     if (newMessages.length === 0) {
       log('No new messages to send after formatting');
       process.exit(0);
@@ -287,30 +178,59 @@ async function main(): Promise<void> {
     const conversationId = await getOrCreateConversation(apiKey, agentId, hookInput.session_id, hookInput.cwd, state, log);
     log(`Using conversation: ${conversationId}`);
 
-    // Save state now (with conversation ID) so it persists even if send fails
+    // Save state now (with conversation ID) so it persists even if worker fails
     saveSyncState(hookInput.cwd, state, log);
 
-    // Send messages directly to Letta (async hook runs in background)
-    const result = await sendBatchToConversation(apiKey, conversationId, hookInput.session_id, newMessages);
+    // Build the message payload (same format as sendBatchToConversation)
+    const transcriptEntries = newMessages.map(m => {
+      const role = m.role === 'user' ? 'user' : m.role === 'assistant' ? 'claude_code' : 'system';
+      const escaped = m.text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      return `<message role="${role}">\n${escaped}\n</message>`;
+    }).join('\n');
 
-    if (result.skipped) {
-      log('Conversation busy (409), will retry on next Stop');
-    } else {
-      // Update lastProcessedIndex on success
-      state.lastProcessedIndex = messages.length - 1;
-      saveSyncState(hookInput.cwd, state, log);
-      log(`Updated state: lastProcessedIndex=${messages.length - 1}`);
-    }
+    const userMessage = `<claude_code_session_update>
+<session_id>${hookInput.session_id}</session_id>
 
-    // Output systemMessage so Claude gets notified on next turn
-    const output = {
-      systemMessage: result.skipped
-        ? 'Letta sync skipped (conversation busy), will retry next stop.'
-        : `Sent ${newMessages.length} messages to Letta agent.`,
+<transcript>
+${transcriptEntries}
+</transcript>
+
+<instructions>
+You may provide commentary or guidance for Claude Code. Your response will be added to Claude's context window on the next prompt. Use this to:
+- Offer observations about the user's work
+- Provide reminders or context from your memory
+- Suggest approaches or flag potential issues
+- Send async messages/guidance to Claude Code
+
+Write your response as if speaking directly to Claude Code.
+</instructions>
+</claude_code_session_update>`;
+
+    // Send via Letta Code SDK (Sub gets client-side tools)
+    const sdkToolsMode = getSdkToolsMode();
+    log(`SDK tools mode: ${sdkToolsMode}`);
+
+    const payloadFile = path.join(TEMP_STATE_DIR, `payload-${hookInput.session_id}-${Date.now()}.json`);
+    const stateFile = getSyncStateFile(hookInput.cwd, hookInput.session_id);
+
+    const sdkPayload = {
+      agentId,
+      conversationId,
+      sessionId: hookInput.session_id,
+      message: userMessage,
+      stateFile,
+      newLastProcessedIndex: messages.length - 1,
+      cwd: hookInput.cwd,
+      sdkToolsMode,
     };
-    console.log(JSON.stringify(output));
+    fs.writeFileSync(payloadFile, JSON.stringify(sdkPayload), 'utf-8');
+    log(`Wrote SDK payload to ${payloadFile}`);
 
-    log('Hook completed');
+    const workerScript = path.join(__dirname, 'send_worker_sdk.ts');
+    const child = spawnSilentWorker(workerScript, payloadFile, hookInput.cwd);
+    log(`Spawned SDK worker (PID: ${child.pid})`);
+
+    log('Hook completed (worker running in background)');
 
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);

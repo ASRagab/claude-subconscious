@@ -31,11 +31,11 @@ import {
   fetchAgent,
   getMode,
   getTempStateDir,
+  getSdkToolsMode,
 } from './conversation_utils.js';
+import { buildLettaApiUrl } from './letta_api_url.js';
 
 // Configuration
-const LETTA_BASE_URL = process.env.LETTA_BASE_URL || 'https://api.letta.com';
-const LETTA_API_BASE = `${LETTA_BASE_URL}/v1`;
 const TEMP_STATE_DIR = getTempStateDir();
 const LOG_FILE = path.join(TEMP_STATE_DIR, 'session_start.log');
 
@@ -172,20 +172,30 @@ async function sendSessionStartMessage(
   sessionId: string,
   cwd: string
 ): Promise<void> {
-  const url = `${LETTA_API_BASE}/conversations/${conversationId}/messages`;
+  const url = buildLettaApiUrl(`/conversations/${conversationId}/messages`);
 
   const projectName = path.basename(cwd);
   const timestamp = new Date().toISOString();
+
+  const sdkToolsMode = getSdkToolsMode();
+  const toolAccessDescription = sdkToolsMode === 'full'
+    ? 'Full tool access enabled — you can Read, Grep, Glob, Edit, Write, Bash, and search the web.'
+    : sdkToolsMode === 'read-only'
+    ? 'Read-only tool access — you can Read, Grep, Glob files and search the web. No writes.'
+    : 'Listen-only mode — no client-side tools. You can only update your memory blocks.';
 
   const message = `<claude_code_session_start>
 <project>${projectName}</project>
 <path>${cwd}</path>
 <session_id>${sessionId}</session_id>
 <timestamp>${timestamp}</timestamp>
+<sdk_tools_mode>${sdkToolsMode}</sdk_tools_mode>
 
 <context>
 A new Claude Code session has begun. I'll be sending you updates as the session progresses.
-You may update your memory blocks with any relevant context for this project.
+
+Tool access: ${toolAccessDescription}
+${sdkToolsMode !== 'off' ? `Use your tools to explore the codebase at ${cwd} when processing transcripts.` : ''}
 </context>
 </claude_code_session_start>`;
 
@@ -285,11 +295,11 @@ async function main(): Promise<void> {
     writeTty('\n');
 
     // Settings
-    const checkpointMode = process.env.LETTA_CHECKPOINT_MODE || 'blocking';
+    const sdkTools = process.env.LETTA_SDK_TOOLS || 'read-only';
     const baseUrl = process.env.LETTA_BASE_URL || 'https://api.letta.com';
     writeTty(`  Model:      ${modelHandle}\n`);
     writeTty(`  Mode:       ${mode}\n`);
-    writeTty(`  Checkpoint: ${checkpointMode}\n`);
+    writeTty(`  SDK Tools:  ${sdkTools}\n`);
     if (process.env.LETTA_BASE_URL) {
       writeTty(`  Server:     ${baseUrl}\n`);
     }

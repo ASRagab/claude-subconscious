@@ -1,54 +1,53 @@
-# Claude Subconscious (Fork)
+# Claude Subconscious
 
-A subconscious for Claude Code. A [Letta](https://letta.com) agent that watches your sessions, accumulates context, and provides async guidance to "main Claude".
-
-> [!NOTE]
-> This is a fork of [letta-ai/claude-subconscious](https://github.com/letta-ai/claude-subconscious) with architectural improvements. See [Fork Changes](#fork-changes) below.
+A background agent that whispers to Claude Code. A [Letta](https://letta.com) agent that watches your sessions, reads your files, builds up memory over time, and whispers guidance back.
 
 > [!IMPORTANT]
-> Claude Subconscious is an experimental way to extend Claude Code (a closed source / black box agent) with the power of Letta's memory system and context engineering.
+> Claude Subconscious is an experimental way to extend Claude Code (a closed source / black box agent) with the power of Letta's memory system, tool access, and context engineering.
 >
 > If you're looking for a coding agent that's memory-first, model agnostic, and fully open source, we recommend using [**Letta Code**](https://github.com/letta-ai/letta-code).
 
 ![evil claude](assets/evil-claude.jpeg)
 
-## Fork Changes
-
-This fork includes the following improvements over [upstream](https://github.com/letta-ai/claude-subconscious):
-
-- **Simplified Stop hook** - Replaced the fire-and-forget worker pattern (`spawn` + temp file + detached process) with a direct Letta API call using Claude Code's native `async: true` hook support. Eliminates orphaned workers, temp file juggling, and Windows spawn issues.
-- **ESM/CJS compatibility fix** - Renamed `silent-npx.js` to `silent-npx.cjs` to resolve module format conflicts when running in ESM projects.
-
 ## What Is This?
 
-Claude Code forgets everything between sessions. Claude Subconscious adds a persistent memory layer underneath:
+Claude Code forgets everything between sessions. Claude Subconscious is a second agent running underneath — watching, learning, and whispering back:
 
-- **A Letta agent observes** every Claude Code conversation
-- **Accumulates patterns** across sessions, projects, and time
-- **Provides async guidance**, reminders, and context
+- **Watches** every Claude Code session transcript
+- **Reads your codebase** — explores files with Read, Grep, and Glob while processing transcripts
+- **Remembers** across sessions, projects, and time
+- **Whispers guidance** — surfaces context, patterns, and reminders before each prompt
+- **Never blocks** — runs in the background via the [Letta Code SDK](https://docs.letta.com/letta-code/sdk/)
 
-Letta agents learn from input and can be customized to store specific information, run tool calls, perform background research, or take autonomous actions. Using Letta's [Conversations](https://docs.letta.com/guides/agents/conversations/) feature, a single agent can serve multiple Claude Code sessions in parallel with shared memory across all of them.
+Not just a memory layer — a background agent with real tool access that gets smarter the more you use it.
+
+Using Letta's [Conversations](https://docs.letta.com/guides/agents/conversations/) feature, a single agent can serve multiple Claude Code sessions in parallel with shared memory across all of them.
 
 ## How It Works
 
-Letta injects content into user prompts via stdout and sends your Claude Code transcript to the subconscious agent each time Claude stops. Nothing is written to CLAUDE.md.
+After each response, the transcript is sent to a Letta agent via the Letta Code SDK. The agent reads files, searches the web, updates its memory — then whispers back before the next prompt. Nothing is written to CLAUDE.md.
 
 ```
-┌─────────────┐          ┌─────────────┐
-│ Claude Code │◄────────►│ Letta Agent │
-└─────────────┘          └─────────────┘
+┌─────────────┐          ┌──────────────────────────┐
+│ Claude Code │◄────────►│ Letta Agent (background)  │
+└─────────────┘          │                          │
+       │                 │  Tools: Read, Grep, Glob │
+       │                 │  Memory: persistent       │
+       │                 │  Web: search, fetch       │
+       │                 └──────────────────────────┘
        │                        │
        │   Session Start        │
        ├───────────────────────►│ New session notification
        │                        │
        │   Before each prompt   │
-       │◄───────────────────────┤ Memory + messages → stdout
+       │◄───────────────────────┤ Whispers guidance → stdout
        │                        │
        │   Before each tool use │
        │◄───────────────────────┤ Mid-workflow updates → stdout
        │                        │
        │   After each response  │
-       ├───────────────────────►│ Transcript → Agent (async)
+       ├───────────────────────►│ Transcript → SDK session (async)
+       │                        │  ↳ Reads files, updates memory
 ```
 
 ## Installation
@@ -56,7 +55,7 @@ Letta injects content into user prompts via stdout and sends your Claude Code tr
 Install from GitHub:
 
 ```
-/plugin marketplace add ASRagab/claude-subconscious
+/plugin marketplace add letta-ai/claude-subconscious
 /plugin install claude-subconscious@claude-subconscious
 ```
 
@@ -72,7 +71,7 @@ Install from GitHub:
 Clone the repository:
 
 ```bash
-git clone https://github.com/ASRagab/claude-subconscious.git
+git clone https://github.com/letta-ai/claude-subconscious.git
 cd claude-subconscious
 npm install
 ```
@@ -121,7 +120,7 @@ export LETTA_BASE_URL="http://localhost:8283"  # For self-hosted Letta
 export LETTA_MODEL="anthropic/claude-sonnet-4-5"  # Model override
 export LETTA_CONTEXT_WINDOW="1048576"             # Context window size (e.g. 1M tokens)
 export LETTA_HOME="$HOME"      # Consolidate .letta state to ~/.letta/
-export LETTA_CHECKPOINT_MODE="blocking"  # Or "async", "off"
+export LETTA_SDK_TOOLS="read-only"       # Or "full", "off"
 ```
 
 - `LETTA_MODE` - Controls what gets injected. `whisper` (default, messages only), `full` (blocks + messages), `off` (disable). See [Modes](#modes).
@@ -130,7 +129,7 @@ export LETTA_CHECKPOINT_MODE="blocking"  # Or "async", "off"
 - `LETTA_MODEL` - Override the agent's model. Optional - the plugin auto-detects and selects from available models. See [Model Configuration](#model-configuration) below.
 - `LETTA_CONTEXT_WINDOW` - Override the agent's context window size (in tokens). Useful when `LETTA_MODEL` is set to a model with a large context window that differs from the server default. Example: `1048576` for 1M tokens.
 - `LETTA_HOME` - Base directory for plugin state files. Creates `{LETTA_HOME}/.letta/claude/` for session data and conversation mappings. Defaults to current working directory. Set to `$HOME` to consolidate all state in one location.
-- `LETTA_CHECKPOINT_MODE` - Controls checkpoint behavior at natural pause points (`AskUserQuestion`, `ExitPlanMode`). See [Checkpoint Hooks](#checkpoint-hooks).
+- `LETTA_SDK_TOOLS` - Controls client-side tool access for the Subconscious agent. `read-only` (default), `full`, or `off`. See [SDK Tools](#sdk-tools).
 
 ### Modes
 
@@ -207,9 +206,11 @@ The model handle format is `provider/model`. Common options:
 | `openai` | `gpt-5.2`, `gpt-5-nano`, `gpt-4.1-mini` |
 | `anthropic` | `claude-sonnet-4-5`, `claude-opus-4-5`, `claude-haiku-4-5` |
 | `google_ai` | `gemini-3-flash`, `gemini-2.5-flash`, `gemini-2.5-pro` |
-| `zai` | `glm-5` (Letta Cloud default) |
+| `zai` | `glm-5` (Letta Cloud default, free) |
 
 If `LETTA_MODEL` is set but not available on the server, the plugin will warn you and fall back to auto-selection.
+
+The default bundled agent uses `zai/glm-5` (free on Letta Cloud). For better tool usage and reasoning, consider switching to a stronger model. You can change the model at any time via the [Agent Development Environment](https://app.letta.com) (ADE) or by setting `LETTA_MODEL`.
 
 **Note:** Ensure your Letta server has the appropriate API key configured for your chosen provider (e.g., `OPENAI_API_KEY` for OpenAI models).
 
@@ -219,12 +220,13 @@ When no agent is configured, the plugin auto-imports a bundled "Subconscious" ag
 
 ### What It Does
 
-The default agent acts as a persistent memory layer that:
+The default agent is a background agent that:
 
-- **Observes** session transcripts asynchronously (not live conversation)
-- **Learns** your preferences from corrections, explicit statements, and patterns
-- **Tracks** project context, pending items, and session patterns
+- **Reads your code** — uses Read, Grep, and Glob to explore your codebase while processing transcripts
+- **Learns your preferences** from corrections, explicit statements, and patterns
+- **Tracks project context** — architecture decisions, known gotchas, pending items
 - **Provides guidance** via the `<letta_message>` block when it has something useful
+- **Searches the web** — can look things up to augment its context
 
 ### Memory Blocks
 
@@ -239,7 +241,7 @@ The default agent Subconscious maintains 8 memory blocks:
 | `session_patterns` | Recurring behaviors, time-based patterns, common struggles |
 | `pending_items` | Unfinished work, explicit TODOs, follow-up items |
 | `self_improvement` | Guidelines for evolving memory architecture over time |
-| `tool_guidelines` | How to use available tools (memory, search, web) |
+| `tool_guidelines` | How to use available tools (memory, filesystem, web search) |
 
 If you set an alternative agent using `LETTA_AGENT_ID`, your agent will use its existing memory architecture.
 
@@ -263,9 +265,8 @@ The plugin uses four Claude Code hooks:
 |------|--------|---------|---------|
 | `SessionStart` | `session_start.ts` | 5s | Notifies agent, cleans up legacy CLAUDE.md |
 | `UserPromptSubmit` | `sync_letta_memory.ts` | 10s | Injects memory + messages via stdout |
-| `PreToolUse` (checkpoint) | `plan_checkpoint.ts` | 10s | Sends transcript at `AskUserQuestion`/`ExitPlanMode` |
-| `PreToolUse` (general) | `pretool_sync.ts` | 5s | Mid-workflow updates via `additionalContext` |
-| `Stop` | `send_messages_to_letta.ts` | 45s (async) | Sends transcript to Letta agent |
+| `PreToolUse` | `pretool_sync.ts` | 5s | Mid-workflow updates via `additionalContext` |
+| `Stop` | `send_messages_to_letta.ts` | 120s | Spawns SDK worker to send transcript (async) |
 
 ### SessionStart
 
@@ -281,7 +282,6 @@ Before each prompt is processed:
 - Fetches agent's current memory blocks and messages
 - In `full` mode: injects all blocks on first prompt, diffs on subsequent prompts
 - In `whisper` mode: injects only messages from Sub
-- Sends user prompt to Letta early (gives the agent a head start)
 
 ### PreToolUse
 
@@ -290,39 +290,40 @@ Before each tool use:
 - If updates found, injects them via `additionalContext`
 - Silent no-op if nothing changed
 
-### Checkpoint Hooks
+### SDK Tools
 
-At certain "natural pause points" — when Claude asks a question (`AskUserQuestion`) or finishes planning (`ExitPlanMode`) — the plugin sends the current transcript to Letta so your Subconscious can provide guidance before Claude proceeds.
+By default, the Subconscious agent now gets **client-side tool access** via the [Letta Code SDK](https://docs.letta.com/letta-code/sdk/). Instead of being limited to memory operations, Sub can read your files, search the web, and explore your codebase while processing transcripts.
 
-**Why this matters:** Normally, Letta only sees transcripts when Claude stops responding (via the Stop hook). Checkpoint hooks let your Subconscious intervene at decision points:
-- Before the user answers a question Claude asked
-- Before implementation begins after a plan is approved
+**Configuration via `LETTA_SDK_TOOLS`:**
 
-**Configuration via `LETTA_CHECKPOINT_MODE`:**
+| Mode | Tools Available | Use Case |
+|------|----------------|----------|
+| `read-only` (default) | `Read`, `Grep`, `Glob`, `web_search`, `fetch_webpage` | Safe background research and file reading |
+| `full` | All tools (Bash, Edit, Write, Task, etc.) | Full autonomy — Sub can make changes and spawn sub-agents |
+| `off` | None (memory-only) | Listen-only — Sub processes transcripts but has no client-side tools |
 
-| Mode | Behavior |
-|------|----------|
-| `blocking` (default) | Wait for Letta response (~2-5s), inject as `additionalContext` before tool executes |
-| `async` | Fire-and-forget; guidance arrives on next `UserPromptSubmit` |
-| `off` | Disable checkpoint hooks; only Stop hook sends transcripts |
+In `full` mode, Sub can spawn sub-agents via the `Task` tool — dispatching parallel research or delegating work to other agents while Claude Code continues working.
 
-In blocking mode, Letta's response is injected as:
-```xml
-<letta_message checkpoint="AskUserQuestion">
-Consider asking about X before proceeding...
-</letta_message>
-```
+> **Note:** Requires `@letta-ai/letta-code-sdk` (installed as a dependency).
 
 ### Stop
 
-Uses Claude Code's native **async hook** support (`"async": true`) to send transcripts without blocking:
+Uses an **async hook** pattern — runs in the background without blocking Claude Code:
 
-- Parses the session transcript (JSONL format)
-- Extracts user messages, assistant responses, thinking blocks, and tool usage
-- Sends messages directly to the Letta API
-- Updates state on success; retries on next Stop if conversation is busy (409)
+1. Main hook (`send_messages_to_letta.ts`) runs quickly:
+   - Parses the session transcript (JSONL format)
+   - Extracts user messages, assistant responses, thinking blocks, and tool usage
+   - Writes payload to a temp file
+   - Spawns detached background worker
+   - Exits immediately
 
-The async flag allows the hook to run in the background with a 45s timeout, eliminating the need for a separate worker process. The timeout provides ~3x headroom over the typical execution time (5-15s), which covers cold starts, slow networks, and first-run agent imports.
+2. Background worker (`send_worker_sdk.ts`) runs independently:
+   - Opens a Letta Code SDK session, giving Sub client-side tools
+   - Sub processes the transcript and can use Read/Grep/Glob to explore the codebase
+   - Updates state on success
+   - Cleans up temp file
+
+The Stop hook runs as an async hook, so it never blocks Claude Code.
 
 ## State Management
 
@@ -339,8 +340,8 @@ Persisted in your project directory (this is **conversation bookkeeping**, not a
 Log files for debugging:
 - `session_start.log` - Session initialization
 - `sync_letta_memory.log` - Memory sync operations
-- `plan_checkpoint.log` - Checkpoint hooks (AskUserQuestion/ExitPlanMode)
-- `send_messages.log` - Stop hook (transcript send)
+- `send_messages.log` - Main Stop hook
+- `send_worker_sdk.log` - SDK background worker
 
 ## What Your Agent Receives
 
@@ -412,15 +413,16 @@ On subsequent prompts, only changed blocks are shown as diffs:
 
 ## First Run
 
-On first use, the agent starts with minimal context. It takes a few sessions before the subconscious has enough signal to provide useful guidance. Give it time - it gets smarter as it observes more.
+On first use, the agent starts with minimal context. It takes a few sessions before it has enough signal to provide useful guidance. Give it time — it reads your code, learns your patterns, and gets smarter the more it observes.
 
 ## Use Cases
 
-- **Persistent project context** - Agent remembers your codebase across sessions
-- **Learned preferences** - "This user always wants explicit type annotations"
-- **Cross-session continuity** - Pick up where you left off
-- **Async guidance** - Agent processes overnight, provides morning insights
-- **Pattern detection** - "You've been debugging auth for 2 hours, maybe step back?"
+- **Persistent project context** — Agent reads your codebase and remembers it across sessions
+- **Learned preferences** — "This user always wants explicit type annotations"
+- **Cross-session continuity** — Pick up where you left off, with full context
+- **Background research** — Agent can search the web and read files while you work
+- **Pattern detection** — "You've been debugging auth for 2 hours, maybe step back?"
+- **Proactive codebase awareness** — Agent explores relevant files when it sees you working on a feature
 
 ## Debugging
 
@@ -432,13 +434,14 @@ tail -f /tmp/letta-claude-sync-$(id -u)/*.log
 
 # Or specific logs
 tail -f /tmp/letta-claude-sync-$(id -u)/send_messages.log
+tail -f /tmp/letta-claude-sync-$(id -u)/send_worker_sdk.log
 ```
 
 ## API Notes
 
 - Memory sync requires `?include=agent.blocks` query parameter (Letta API doesn't include relationship fields by default)
-- 409 Conflict responses are handled gracefully - messages queue for next sync when conversation is busy
-- Conversations API returns streaming responses; the Stop hook reads only the first chunk to confirm acceptance, then releases the stream
+- All transcript delivery uses the [Letta Code SDK](https://docs.letta.com/letta-code/sdk/) — no raw API calls for message sending
+- The SDK worker streams the agent's full response before updating state
 
 ## License
 
