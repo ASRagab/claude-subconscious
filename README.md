@@ -71,7 +71,7 @@ Install from GitHub:
 Clone the repository:
 
 ```bash
-git clone https://github.com/letta-ai/claude-subconscious.git
+git clone https://github.com/ASRagab/claude-subconscious.git
 cd claude-subconscious
 npm install
 ```
